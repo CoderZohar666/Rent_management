@@ -1,0 +1,1 @@
+const i=(t,n,e)=>{if(!t||t.length===0)return[];const s=(n-1)*e,g=s+e;return t.slice(s,g)},o=()=>({pageSize:JSON.parse(localStorage.getItem("system_settings")||"{}").page_size||20,pageSizes:[10,20,50,100]});export{o as g,i as p};

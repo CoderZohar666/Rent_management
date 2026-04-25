@@ -1,0 +1,1 @@
+const n=r=>{const t=Number(r);return Number.isFinite(t)?t.toLocaleString("zh-CN",{minimumFractionDigits:0,maximumFractionDigits:0}):"0"},m=(r,t=1)=>{const i=Number(r);return Number.isFinite(i)?i.toLocaleString("zh-CN",{minimumFractionDigits:t,maximumFractionDigits:t}):"0"},e=r=>{const t=Number(r);return Number.isFinite(t)?`${Math.round(t)}%`:"0%"};export{m as a,e as b,n as f};
