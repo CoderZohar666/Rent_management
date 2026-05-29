@@ -3,6 +3,125 @@
  * 使用 localStorage 模拟数据库存储
  */
 
+export const DB_SCHEMA_VERSION = 2
+
+export const DB_TABLES = [
+  'users',
+  'cities',
+  'projects',
+  'rooms',
+  'tenants',
+  'contracts',
+  'bills',
+  'maintenance_orders',
+  'meter_readings',
+  'deposits',
+  'business_events'
+]
+
+const META_DEFAULTS = {
+  system_settings: {},
+  notifications: [],
+  operation_logs: [],
+  last_backup_time: ''
+}
+
+const isPlainObject = (value) => Object.prototype.toString.call(value) === '[object Object]'
+
+const requirePlainObject = (value, message) => {
+  if (!isPlainObject(value)) {
+    throw new Error(message)
+  }
+}
+
+const requireTable = (data, tableName) => {
+  if (!Array.isArray(data[tableName])) {
+    throw new Error(`备份文件缺少有效的 ${tableName} 数据表`)
+  }
+}
+
+const ensureUniqueIds = (records, tableName) => {
+  const ids = new Set()
+  records.forEach((record, index) => {
+    requirePlainObject(record, `${tableName} 第 ${index + 1} 条记录格式错误`)
+    if (!record.id || typeof record.id !== 'string') {
+      throw new Error(`${tableName} 第 ${index + 1} 条记录缺少有效ID`)
+    }
+    if (ids.has(record.id)) {
+      throw new Error(`${tableName} 存在重复ID：${record.id}`)
+    }
+    ids.add(record.id)
+  })
+  return ids
+}
+
+const ensureReference = (ids, id, message) => {
+  if (id && !ids.has(id)) {
+    throw new Error(message)
+  }
+}
+
+export const validateImportData = (data) => {
+  requirePlainObject(data, '备份文件必须是 JSON 对象')
+
+  if (data.__schema_version && Number(data.__schema_version) > DB_SCHEMA_VERSION) {
+    throw new Error(`备份版本 ${data.__schema_version} 高于当前系统版本 ${DB_SCHEMA_VERSION}，请升级系统后再导入`)
+  }
+
+  DB_TABLES.forEach((tableName) => requireTable(data, tableName))
+
+  const normalized = {}
+  DB_TABLES.forEach((tableName) => {
+    normalized[tableName] = data[tableName].map((record) => ({ ...record }))
+  })
+
+  const ids = Object.fromEntries(
+    DB_TABLES.map((tableName) => [tableName, ensureUniqueIds(normalized[tableName], tableName)])
+  )
+
+  normalized.projects.forEach((project) => {
+    ensureReference(ids.cities, project.city_id, `项目 ${project.name || project.id} 关联的城市不存在`)
+  })
+  normalized.rooms.forEach((room) => {
+    ensureReference(ids.projects, room.project_id, `房间 ${room.room_number || room.id} 关联的项目不存在`)
+  })
+  normalized.tenants.forEach((tenant) => {
+    ensureReference(ids.rooms, tenant.room_id, `租户 ${tenant.name || tenant.id} 关联的房间不存在`)
+  })
+  normalized.contracts.forEach((contract) => {
+    ensureReference(ids.rooms, contract.room_id, `合同 ${contract.id} 关联的房间不存在`)
+    ensureReference(ids.tenants, contract.tenant_id, `合同 ${contract.id} 关联的租户不存在`)
+  })
+  normalized.bills.forEach((bill) => {
+    ensureReference(ids.contracts, bill.contract_id, `账单 ${bill.id} 关联的合同不存在`)
+    ensureReference(ids.projects, bill.project_id, `账单 ${bill.id} 关联的项目不存在`)
+    ensureReference(ids.cities, bill.city_id, `账单 ${bill.id} 关联的城市不存在`)
+  })
+  normalized.maintenance_orders.forEach((order) => {
+    ensureReference(ids.rooms, order.room_id, `维修工单 ${order.id} 关联的房间不存在`)
+    ensureReference(ids.tenants, order.tenant_id, `维修工单 ${order.id} 关联的租户不存在`)
+  })
+  normalized.meter_readings.forEach((record) => {
+    ensureReference(ids.rooms, record.room_id, `抄表记录 ${record.id} 关联的房间不存在`)
+    ensureReference(ids.bills, record.generated_bill_id, `抄表记录 ${record.id} 关联的账单不存在`)
+  })
+  normalized.deposits.forEach((deposit) => {
+    ensureReference(ids.contracts, deposit.contract_id, `押金 ${deposit.id} 关联的合同不存在`)
+    ensureReference(ids.rooms, deposit.room_id, `押金 ${deposit.id} 关联的房间不存在`)
+    ensureReference(ids.tenants, deposit.tenant_id, `押金 ${deposit.id} 关联的租户不存在`)
+  })
+
+  const meta = isPlainObject(data.__meta) ? data.__meta : {}
+  normalized.__meta = {
+    system_settings: isPlainObject(meta.system_settings) ? meta.system_settings : META_DEFAULTS.system_settings,
+    notifications: Array.isArray(meta.notifications) ? meta.notifications : META_DEFAULTS.notifications,
+    operation_logs: Array.isArray(meta.operation_logs) ? meta.operation_logs : META_DEFAULTS.operation_logs,
+    last_backup_time: typeof meta.last_backup_time === 'string' ? meta.last_backup_time : META_DEFAULTS.last_backup_time
+  }
+
+  return normalized
+}
+
 class LocalDB {
   constructor() {
     this.initDB()
@@ -12,17 +131,7 @@ class LocalDB {
   initDB() {
     if (!localStorage.getItem('rental_db_initialized')) {
       // 创建所有表
-      this.createTable('users', [])
-      this.createTable('cities', [])
-      this.createTable('projects', [])
-      this.createTable('rooms', [])
-      this.createTable('tenants', [])
-      this.createTable('contracts', [])
-      this.createTable('bills', [])
-      this.createTable('maintenance_orders', [])
-      this.createTable('meter_readings', [])
-      this.createTable('deposits', [])
-      this.createTable('business_events', [])
+      DB_TABLES.forEach((tableName) => this.createTable(tableName, []))
 
       // 创建默认管理员账号
       this.insert('users', {
@@ -256,10 +365,11 @@ class LocalDB {
   // 导出数据
   exportData() {
     const data = {}
-    const tables = ['users', 'cities', 'projects', 'rooms', 'tenants', 'contracts', 'bills', 'maintenance_orders', 'meter_readings', 'deposits', 'business_events']
-    tables.forEach(table => {
+    DB_TABLES.forEach(table => {
       data[table] = this.getTable(table)
     })
+    data.__schema_version = DB_SCHEMA_VERSION
+    data.__exported_at = new Date().toISOString()
     data.__meta = {
       system_settings: JSON.parse(localStorage.getItem('system_settings') || '{}'),
       notifications: JSON.parse(localStorage.getItem('notifications') || '[]'),
@@ -271,17 +381,14 @@ class LocalDB {
 
   // 导入数据
   importData(data) {
-    Object.keys(data).forEach(table => {
-      if (table !== '__meta') {
-        this.setTable(table, data[table])
-      }
+    const normalized = validateImportData(data)
+    DB_TABLES.forEach(table => {
+      this.setTable(table, normalized[table])
     })
-    if (data.__meta) {
-      localStorage.setItem('system_settings', JSON.stringify(data.__meta.system_settings || {}))
-      localStorage.setItem('notifications', JSON.stringify(data.__meta.notifications || []))
-      localStorage.setItem('operation_logs', JSON.stringify(data.__meta.operation_logs || []))
-      localStorage.setItem('last_backup_time', data.__meta.last_backup_time || '')
-    }
+    localStorage.setItem('system_settings', JSON.stringify(normalized.__meta.system_settings))
+    localStorage.setItem('notifications', JSON.stringify(normalized.__meta.notifications))
+    localStorage.setItem('operation_logs', JSON.stringify(normalized.__meta.operation_logs))
+    localStorage.setItem('last_backup_time', normalized.__meta.last_backup_time)
     localStorage.setItem('rental_db_initialized', 'true')
   }
 }

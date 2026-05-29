@@ -10,6 +10,11 @@
       <SectionCard title="数据管理" subtitle="备份、恢复和初始化系统数据">
         <div class="settings-stack">
           <el-alert title="所有备份文件均为 JSON 格式，恢复操作会覆盖当前本地数据。" type="info" :closable="false" />
+          <el-alert
+            title="本系统为本地单机版，数据仅保存在当前浏览器。请定期导出备份，避免清理浏览器数据后丢失。"
+            type="warning"
+            :closable="false"
+          />
 
           <div class="setting-row">
             <div>
@@ -187,7 +192,11 @@ const importData = (file) => {
           ElMessage.success('数据导入成功，页面将刷新')
           setTimeout(() => location.reload(), 1000)
         })
-        .catch(() => {})
+        .catch((error) => {
+          if (error?.message) {
+            ElMessage.error(error.message)
+          }
+        })
     } catch {
       ElMessage.error('文件格式错误')
     }

@@ -68,6 +68,7 @@
         </el-form>
 
         <div class="login-tips">
+          <span>本地单机版：数据仅保存在当前浏览器</span>
           <span>默认账号：`admin`</span>
           <span>默认密码：`admin123`</span>
         </div>

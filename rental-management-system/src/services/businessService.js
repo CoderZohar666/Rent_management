@@ -13,6 +13,21 @@ const createError = (message) => {
   throw new Error(message)
 }
 
+const ensureValidDateRange = (startDate, endDate) => {
+  if (!dayjs(startDate).isValid() || !dayjs(endDate).isValid()) {
+    createError('请选择有效的合同日期')
+  }
+  if (dayjs(endDate).isBefore(dayjs(startDate), 'day')) {
+    createError('合同结束日期不能早于开始日期')
+  }
+}
+
+const ensurePositiveAmount = (value, message) => {
+  if (Number(value) <= 0) {
+    createError(message)
+  }
+}
+
 const getContractDisplayStatus = (contract) => {
   if (!contract) return 'draft'
   if (contract.status === 'settled' || contract.status === 'terminated' || contract.status === 'draft') {
@@ -74,6 +89,22 @@ const ensureRoomAvailable = (roomId, ignoreContractId = '') => {
   return room
 }
 
+const ensureRoomExists = (roomId) => {
+  const room = db.findById('rooms', roomId)
+  if (!room) {
+    createError('房间不存在')
+  }
+  return room
+}
+
+const ensureProjectExists = (projectId) => {
+  const project = db.findById('projects', projectId)
+  if (!project) {
+    createError('项目不存在')
+  }
+  return project
+}
+
 const ensureTenantExists = (tenantId) => {
   const tenant = db.findById('tenants', tenantId)
   if (!tenant) {
@@ -114,6 +145,9 @@ const syncTenantRoomLink = (tenantId, fallbackRoomId = null) => {
 const buildBillPayload = ({ contract, room, billType, amount, dueDate, sourceType, sourceId, remark }) => {
   const project = db.findById('projects', room.project_id)
   const city = project ? db.findById('cities', project.city_id) : null
+  if (!project || !city) {
+    createError('房间关联的项目或城市不存在，不能生成账单')
+  }
   const periodKey = monthKey(dueDate)
 
   return {
@@ -169,6 +203,9 @@ export const businessService = {
   getContractDisplayStatus,
 
   createContract(payload) {
+    ensureValidDateRange(payload.start_date, payload.end_date)
+    ensurePositiveAmount(payload.monthly_rent, '月租金必须大于0')
+    ensurePositiveAmount(payload.deposit, '押金必须大于0')
     const room = ensureRoomAvailable(payload.room_id)
     const tenant = ensureTenantExists(payload.tenant_id)
     const contract = db.insert('contracts', {
@@ -204,6 +241,10 @@ export const businessService = {
     if (contract.status !== 'active') {
       createError('仅执行中的合同允许编辑')
     }
+
+    ensureValidDateRange(payload.start_date || contract.start_date, payload.end_date || contract.end_date)
+    ensurePositiveAmount(payload.monthly_rent ?? contract.monthly_rent, '月租金必须大于0')
+    ensurePositiveAmount(payload.deposit ?? contract.deposit, '押金必须大于0')
 
     const nextTenantId = payload.tenant_id || contract.tenant_id
     ensureTenantExists(nextTenantId)
@@ -298,8 +339,11 @@ export const businessService = {
       checkout_status: 'completed',
       terminated_at: dayjs().format('YYYY-MM-DD HH:mm:ss')
     })
-    db.update('rooms', contract.room_id, { status: roomStatusAfter })
-    syncRoomStatus(contract.room_id)
+    if (roomStatusAfter === 'maintenance') {
+      db.update('rooms', contract.room_id, { status: 'maintenance' })
+    } else {
+      syncRoomStatus(contract.room_id)
+    }
     syncTenantRoomLink(contract.tenant_id)
 
     addNotification({
@@ -322,6 +366,11 @@ export const businessService = {
     if (contract.status !== 'active') {
       createError('仅执行中的合同允许续租')
     }
+    ensureValidDateRange(payload.start_date, payload.end_date)
+    if (!dayjs(payload.start_date).isAfter(dayjs(contract.end_date), 'day')) {
+      createError('续租开始日期必须晚于原合同结束日期')
+    }
+    ensurePositiveAmount(payload.monthly_rent, '续租月租金必须大于0')
 
     db.update('contracts', contractId, {
       status: 'settled',
@@ -357,7 +406,7 @@ export const businessService = {
     if (contract.status !== 'active') {
       createError('仅执行中的合同允许生成租金账单')
     }
-    const room = db.findById('rooms', contract.room_id)
+    const room = ensureRoomExists(contract.room_id)
     const periodKey = monthKey(dueDate)
     const exists = db.getTable('bills').find((item) =>
       item.contract_id === contractId &&
@@ -426,6 +475,12 @@ export const businessService = {
     if (!payload.room_id) {
       createError('请选择房间')
     }
+    ensureRoomExists(payload.room_id)
+    ;['water_meter', 'electricity_meter', 'gas_meter', 'water_price', 'electricity_price', 'gas_price'].forEach((field) => {
+      if (Number(payload[field]) < 0) {
+        createError('表读数和单价不能为负数')
+      }
+    })
     const periodKey = monthKey(payload.reading_date)
     const exists = db.getTable('meter_readings').find((item) =>
       item.room_id === payload.room_id && item.period_key === periodKey
@@ -477,6 +532,12 @@ export const businessService = {
     if (record.generated_bill_id) {
       createError('该抄表记录已生成账单，不能再编辑')
     }
+    ensureRoomExists(payload.room_id)
+    ;['water_meter', 'electricity_meter', 'gas_meter', 'water_price', 'electricity_price', 'gas_price'].forEach((field) => {
+      if (Number(payload[field]) < 0) {
+        createError('表读数和单价不能为负数')
+      }
+    })
     const periodKey = monthKey(payload.reading_date)
     const duplicate = db.getTable('meter_readings').find((item) =>
       item.id !== recordId &&
@@ -526,6 +587,9 @@ export const businessService = {
       createError('该抄表记录已生成过账单')
     }
     const room = db.findById('rooms', record.room_id)
+    if (!room) {
+      createError('抄表记录关联的房间不存在')
+    }
     const contract = getActiveContractByRoom(record.room_id)
     if (!contract) {
       createError('该房间没有执行中的合同')
@@ -570,6 +634,7 @@ export const businessService = {
     if (!contract) {
       createError('该房间没有执行中的合同，不能登记押金')
     }
+    ensurePositiveAmount(payload.amount, '押金金额必须大于0')
     if (payload.room_id && contract.room_id !== payload.room_id) {
       createError('押金记录的房间与合同不匹配')
     }
@@ -603,17 +668,28 @@ export const businessService = {
     if (!deposit) {
       createError('押金记录不存在')
     }
+    if (!UNSETTLED_DEPOSIT_STATUSES.includes(deposit.status)) {
+      createError('该押金已结算，不能重复退还')
+    }
+    const deduction = Number(payload.deduction || 0)
+    if (deduction < 0 || deduction > Number(deposit.amount)) {
+      createError('扣除金额不能小于0或大于原押金')
+    }
+    const refundAmount = Number(payload.refund_amount)
+    if (refundAmount !== Number(deposit.amount) - deduction) {
+      createError('实际退还金额必须等于原押金减扣除金额')
+    }
 
-    const deductionItems = payload.deduction > 0 ? [{
-      amount: payload.deduction,
+    const deductionItems = deduction > 0 ? [{
+      amount: deduction,
       reason: payload.deduction_reason || '押金扣减'
     }] : []
 
     const updated = db.update('deposits', depositId, {
-      status: payload.deduction > 0 ? 'partially_refunded' : 'refunded',
-      deduction: payload.deduction,
+      status: deduction > 0 ? 'partially_refunded' : 'refunded',
+      deduction,
       deduction_items: deductionItems,
-      refund_amount: payload.refund_amount,
+      refund_amount: refundAmount,
       refund_date: formatDate(payload.refund_date),
       refund_reason: payload.refund_reason,
       deduction_reason: payload.deduction_reason,
@@ -650,6 +726,7 @@ export const businessService = {
     if (!room) {
       createError('房间不存在')
     }
+    ensureProjectExists(payload.project_id || room.project_id)
     const updated = db.update('rooms', roomId, {
       ...payload,
       status: room.status
@@ -660,6 +737,7 @@ export const businessService = {
   },
 
   createRoom(payload) {
+    ensureProjectExists(payload.project_id)
     const room = db.insert('rooms', {
       ...payload,
       status: 'vacant'
@@ -718,6 +796,10 @@ export const businessService = {
   },
 
   createMaintenanceOrder(payload) {
+    const room = ensureRoomExists(payload.room_id)
+    if (payload.tenant_id) {
+      ensureTenantExists(payload.tenant_id)
+    }
     const order = db.insert('maintenance_orders', payload)
     db.update('rooms', payload.room_id, { status: 'maintenance' })
     logAndEvent({
@@ -728,7 +810,7 @@ export const businessService = {
       category: 'maintenance',
       type: 'primary',
       title: '新维修工单',
-      message: `房间${db.findById('rooms', payload.room_id)?.room_number || '-'}新增维修工单。`,
+      message: `房间${room.room_number || '-'}新增维修工单。`,
       action: { text: '查看工单', route: '/maintenance' },
       dedupe_key: `maintenance-created:${order.id}`
     })
@@ -740,7 +822,16 @@ export const businessService = {
     if (!order) {
       createError('维修工单不存在')
     }
+    if (payload.room_id) {
+      ensureRoomExists(payload.room_id)
+    }
+    if (payload.tenant_id) {
+      ensureTenantExists(payload.tenant_id)
+    }
     const updated = db.update('maintenance_orders', orderId, payload)
+    if (payload.room_id && payload.room_id !== order.room_id) {
+      syncRoomStatus(order.room_id)
+    }
     syncRoomStatus(updated.room_id)
     addLog({ type: 'update', module: '维修管理', description: `更新维修工单 ${orderId}` })
     addBusinessEvent({ type: 'maintenance_updated', module: 'maintenance_orders', entity_id: orderId, description: '维修工单已更新' })
